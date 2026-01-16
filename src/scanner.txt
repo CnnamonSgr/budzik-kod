@@ -1,0 +1,54 @@
+#include <Arduino.h>
+#include <Wire.h>
+
+void setup() {
+  // Ustawienie prędkości monitora szeregowego
+  Serial.begin(115200);
+  while (!Serial); // Czekaj na otwarcie monitora
+  
+  delay(2000); // Daj chwilę na ustabilizowanie zasilania
+  Serial.println("\n--- START SKANOWANIA MAGISTRALI I2C ---");
+
+  // Inicjalizacja I2C na Twoich pinach
+  Wire.begin(21, 22); 
+}
+
+void loop() {
+  byte error, address;
+  int nDevices = 0;
+
+  Serial.println("Szukam urzadzen...");
+
+  for (address = 1; address < 127; address++) {
+    // Próba nawiązania komunikacji z danym adresem
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.print("ZNALEZIONO urzadzenie pod adresem 0x");
+      if (address < 16) Serial.print("0");
+      Serial.print(address, HEX);
+
+      // Podpowiedź co to za urządzenie
+      if (address == 0x3C || address == 0x3D) Serial.println(" (Ekran OLED)");
+      else if (address == 0x69) Serial.println(" (Zyroskop MPU6050)");
+      else Serial.println(" (Nieznane urzadzenie)");
+
+      nDevices++;
+    }
+    else if (error == 4) {
+      Serial.print("Nieznany blad na adresie 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+    }
+  }
+
+  if (nDevices == 0) {
+    Serial.println("BRAK urzadzen I2C. Sprawdz SDA i SCL oraz zasilanie!");
+  } else {
+    Serial.println("Skanowanie zakonczone.");
+  }
+
+  Serial.println("---------------------------------------");
+  delay(5000); // Powtarzaj co 5 sekund
+}

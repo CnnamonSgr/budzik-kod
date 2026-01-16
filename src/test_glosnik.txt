@@ -1,0 +1,49 @@
+#include <Arduino.h>
+#include "Audio.h"
+#include "SD.h"
+#include "SPI.h"
+
+// Piny I2S (Wzmacniacz)
+#define I2S_LRC       25
+#define I2S_BCLK      26
+#define I2S_DOUT      32
+
+// Piny SPI (Czytnik SD)
+#define SD_CS          5
+
+Audio audio;
+
+void setup() {
+    Serial.begin(115200);
+    
+    // 1. Inicjalizacja Karty SD
+    // Piny SPI ESP32: 23 (MOSI), 19 (MISO), 18 (SCK) są używane domyślnie
+    if(!SD.begin(SD_CS)){
+        Serial.println("BLAD: Nie znaleziono karty SD");
+        return;
+    }
+    Serial.println("Karta SD OK!");
+
+    // 2. Inicjalizacja Audio
+    audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+    audio.setVolume(21); // Głośność 0-21 
+
+    // 3. Start odtwarzania pliku
+    Serial.println("Probuje odtworzyc test.mp3...");
+    audio.connecttoFS(SD, "/test_dzwiek.mp3"); 
+}
+
+void loop() {
+    audio.loop(); 
+    
+    // Sprawdzaj co 1s w Serial Monitorze, czy system audio pracuje
+    static unsigned long lastTime = 0;
+    if(millis() - lastTime > 1000){
+        if(audio.isRunning()){
+            Serial.println("Glosnik gra...");
+        } else {
+            Serial.println("Cisza - sprawdz plik na karcie");
+        }
+        lastTime = millis();
+    }
+}
