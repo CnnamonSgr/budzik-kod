@@ -52,8 +52,8 @@ int pobierzStabilneProcenty() {
 void pobierzKonfiguracje() {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    http.begin(String(server_url) + "/robot/config");
-    http.addHeader("X-API-KEY", api_key); // Zabezpieczenie
+    http.begin(String(SERVER_URL) + "/robot/config");
+    http.addHeader("X-API-KEY", API_KEY); // Zabezpieczenie
     int httpCode = http.GET();
     if (httpCode == 200) {
       DynamicJsonDocument doc(512);
@@ -68,8 +68,8 @@ void pobierzKonfiguracje() {
 void sprawdzStatusSerwera() {
   if (WiFi.status() == WL_CONNECTED && alarmAktywny) {
     HTTPClient http;
-    http.begin(String(server_url) + "/robot/status");
-    http.addHeader("X-API-KEY", api_key); // Zabezpieczenie
+    http.begin(String(SERVER_URL) + "/robot/status");
+    http.addHeader("X-API-KEY", API_KEY); // Zabezpieczenie
     int httpCode = http.GET();
     if (httpCode == 200) {
       String status = http.getString();
@@ -156,8 +156,8 @@ void loop() {
         audio.connecttoFS(SD, "/test_dzwiek.mp3");
         // Powiadom serwer, że budzik ruszył (żeby apka wiedziała, by pokazać pytanie)
         HTTPClient http;
-        http.begin(String(server_url) + "/robot/trigger");
-        http.addHeader("X-API-KEY", api_key);
+        http.begin(String(SERVER_URL) + "/robot/trigger");
+        http.addHeader("X-API-KEY", API_KEY);
         http.POST("");
         http.end();
       }
