@@ -1,0 +1,267 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <Preferences.h> // Do zapamiętywania WiFi
+#include "Audio.h"
+#include "SD.h"
+#include "SPI.h"
+#include "time.h"
+#include "secrets.h" // Dane tajne
+
+// PINY
+#define I2S_LRC 25
+#define I2S_BCLK 26
+#define I2S_DOUT 32
+#define SD_CS 5
+#define BATTERY_PIN 34
+#define BUTTON_PIN 4
+
+// KONFIGURACJA
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 3600;      
+const int   daylightOffset_sec = 3600; 
+
+// Piny silników 
+const int A1A = 14; // IN1
+const int A1B = 27; // IN2
+const int B1A = 13; // IN3
+const int B1B = 33; // IN4
+
+// OBIEKTY
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+Audio audio;
+Preferences preferences;
+
+// ZMIENNE GLOBALNE
+float filtrowaneNapiecie = 0;
+bool alarmAktywny = false;
+String godzinaAlarmu = "07:00";
+int wyswietlanyProcent = 0;
+
+// --- FUNKCJA ODCZYTU BATERII (FILTR EMA) ---
+int pobierzProcenty() {
+  long sumaRaw = 0;
+  for(int i = 0; i < 30; i++) sumaRaw += analogRead(BATTERY_PIN);
+  float vBat = ((float)sumaRaw / 30 / 4095.0) * 3.3 * 2.0 * 1.07;
+  if (filtrowaneNapiecie == 0) filtrowaneNapiecie = vBat;
+  filtrowaneNapiecie = (vBat * 0.1) + (filtrowaneNapiecie * 0.9);
+  return constrain(map(filtrowaneNapiecie * 100, 335, 415, 0, 100), 0, 100);
+}
+
+// --- POBIERANIE KONFIGURACJI Z SERWERA (Z KLUCZEM API) ---
+void pobierzKonfiguracje() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(String(SERVER_URL) + "/robot/config");
+    http.addHeader("X-API-KEY", API_KEY); // Zabezpieczenie
+    int httpCode = http.GET();
+    if (httpCode == 200) {
+      JsonDocument doc;
+      deserializeJson(doc, http.getString());
+      godzinaAlarmu = doc["godzina"].as<String>();
+    }
+    http.end();
+  }
+}
+
+// --- SPRAWDZANIE CZY UŻYTKOWNIK ROZWIĄZAŁ ZAGADKĘ ---
+void sprawdzStatusSerwera() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Błąd: Brak połączenia z WiFi!");
+    return;
+  }
+
+  Serial.print("Pukam do serwera: ");
+  Serial.println(SERVER_URL);
+
+  HTTPClient http;
+  http.begin(String(SERVER_URL) + "/robot/status");
+  http.addHeader("X-API-KEY", API_KEY);
+  
+  int httpCode = http.GET();
+  Serial.print("Odpowiedź HTTP: ");
+  Serial.println(httpCode);
+
+  if (httpCode == 200) {
+    String status = http.getString();
+    Serial.print("Status z bazy: ");
+    Serial.println(status);
+
+    if (status == "active" && !alarmAktywny) {
+      Serial.println("!!! ALARM AKTYWOWANY Z SERWERA !!!");
+      alarmAktywny = true;
+      audio.connecttoFS(SD, "/test_dzwiek.mp3");
+    } else if (status == "idle" && alarmAktywny) {
+      Serial.println("Uciszam budzik - status zmieniony na idle.");
+      alarmAktywny = false;
+      audio.stopSong();
+    }
+  } else {
+    Serial.println("Błąd komunikacji z API!");
+  }
+  http.end();
+}
+
+void audio_eof_mp3(const char *info){
+  if(alarmAktywny) audio.connecttoFS(SD, "/test_dzwiek.mp3");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) Serial.println("OLED błąd!");
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+  display.display();
+
+  // ODCZYT WIFI Z PAMIĘCI
+// --- ODCZYT WIFI Z PAMIĘCI ---
+  preferences.begin("wifi-config", true); // Tryb tylko do odczytu
+  String ssid_pref = preferences.getString("ssid", "");
+  String pass_pref = preferences.getString("pass", "");
+  preferences.end();
+
+  String final_ssid, final_pass;
+
+  if (ssid_pref == "") {
+    // JEŚLI PAMIĘĆ JEST PUSTA -> UŻYJ DANYCH Z secrets.h
+    Serial.println("Nie znaleziono zapisanych sieci. Uzywam secrets.h");
+    final_ssid = SSID;
+    final_pass = PASSWORD;
+  } else {
+    // JEŚLI COŚ JEST ZAPISANE -> UŻYJ TEGO
+    Serial.println("Znalazlem zapisana siec w pamieci.");
+    final_ssid = ssid_pref;
+    final_pass = pass_pref;
+  }
+
+  // --- PRÓBA POŁĄCZENIA ---
+  display.setCursor(0, 20);
+  display.println("Laczenie: " + final_ssid);
+  display.display();
+  
+  WiFi.begin(final_ssid.c_str(), final_pass.c_str());
+
+  int timeout = 0;
+  while (WiFi.status() != WL_CONNECTED && timeout < 20) {
+    delay(500);
+    Serial.print(".");
+    timeout++;
+  }
+
+  if(WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi polaczone! Synchronizuje czas...");
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    
+    // CZEKAJ AZ CZAS SIE POJAWI (Max 10 sekund)
+    struct tm timeinfo;
+    int retry = 0;
+    while(!getLocalTime(&timeinfo) && retry < 10) {
+      Serial.println("Czekam na NTP...");
+      delay(1000);
+      retry++;
+    }
+    
+    if(retry < 10) Serial.println("Czas zsynchronizowany!");
+    else Serial.println("Blad NTP - dzialam bez czasu.");
+    
+    pobierzKonfiguracje();
+  }
+
+  delay(1000); // Daje czas komponentom na "ochłonięcie" po starcie prądu
+  if(!SD.begin(SD_CS)) {
+    Serial.println("SD błąd! Próbuję ponownie...");
+    delay(1000);
+    if(!SD.begin(SD_CS)) Serial.println("SD błąd krytyczny!");
+  }
+
+  audio.setPinout(I2S_BCLK, I2S_LRC, I2S_DOUT);
+  audio.setVolume(7); 
+}
+
+void loop() {
+  audio.loop(); 
+
+
+// --- OBSŁUGA FIZYCZNEGO PRZYCISKU SNOOZE ---
+  if (digitalRead(BUTTON_PIN) == LOW && alarmAktywny) {
+    Serial.println("PRZYCISK NACISNIETY! Informuje serwer...");
+    
+    // 1. Wyłączamy dźwięk natychmiast (lokalnie)
+    alarmAktywny = false;
+    audio.stopSong();
+
+    // 2. Wysyłamy informację do Twojego API na serwerze
+    if (WiFi.status() == WL_CONNECTED) {
+      HTTPClient http;
+      // Łączymy się z nową trasą /robot/snooze, którą dodałeś do app.py
+      http.begin(String(SERVER_URL) + "/robot/snooze");
+      
+      // DODAJEMY KLUCZ API (bez tego serwer nas odrzuci!)
+      http.addHeader("X-API-KEY", API_KEY); 
+      
+      int httpCode = http.GET(); // Wywołujemy funkcję snooze na serwerze
+      
+      if (httpCode == 200) {
+        Serial.println("Serwer przyjal snooze - status w bazie to teraz 'idle'");
+      } else {
+        Serial.printf("Blad komunikacji z serwerem: %d\n", httpCode);
+      }
+      http.end();
+    }
+
+    delay(500); // Mały debouncing, żeby nie wysłać 100 zapytań naraz
+  }
+
+  // LOGIKA CZASOWA (Co sekundę)
+  static unsigned long lastUpdate = 0;
+  if (millis() - lastUpdate > 1000) {
+    sprawdzStatusSerwera();
+    // Odkomentuje jak naprawie modul silnikowy (i jak napisze funkcje)
+    //ruch(alarmAktywny ? 180 : 0);
+
+    struct tm timeinfo;
+    char timeString[9] = "--:--:--"; // Domyślny tekst, jeśli nie ma czasu
+    if(getLocalTime(&timeinfo)) {
+      sprintf(timeString, "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    }
+
+    display.clearDisplay();
+    
+    // Bateria
+    display.setTextSize(1);
+    display.setCursor(95, 0);
+    display.print(pobierzProcenty()); display.print("%");
+    
+    // Godzina (WIELKA)
+    display.setTextSize(2);
+    display.setCursor(16, 25);
+    display.print(timeString);
+    
+    // Status na dole (BEZ POLSKICH ZNAKOW)
+    display.setTextSize(1);
+    display.setCursor(0, 55);
+    if(alarmAktywny) {
+        display.print("ALARM: GRA!");
+    } else {
+        // Upewnij się, że godzinaAlarmu nie jest pusta
+        String msg = "BUDZIK: " + (godzinaAlarmu.length() > 0 ? godzinaAlarmu : "BRAK");
+        display.print(msg);
+    }
+    
+    // Status połączenia
+    display.setCursor(0, 0);
+    display.print(WiFi.status() == WL_CONNECTED ? "WiFi: OK" : "WiFi: BLAD");
+    
+    display.display();
+    lastUpdate = millis();
+  }
+}
